@@ -6,3 +6,4 @@ python-dotenv
 ffmpeg-python
 networkx
 pyvis
+reportlab
