@@ -1,295 +1,277 @@
 import os
-import re
 import json
 import yt_dlp
-import streamlit as st
 from dotenv import load_dotenv
-from groq import Groq
 from faster_whisper import WhisperModel
-from youtube_transcript_api import YouTubeTranscriptApi
-from pyvis.network import Network
+from groq import Groq
 
 load_dotenv()
 
-# --------------------------------------------------
-# API KEY SETUP
-# --------------------------------------------------
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
+# Groq client
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-if not GROQ_API_KEY:
-    raise ValueError(
-        "GROQ_API_KEY is missing. Add it in Streamlit Cloud Secrets or local .env file."
-    )
-
-client = Groq(api_key=GROQ_API_KEY)
-
-
-# --------------------------------------------------
-# WHISPER MODEL
-# --------------------------------------------------
-@st.cache_resource
-def load_whisper_model():
-    return WhisperModel("base", device="cpu", compute_type="int8")
+# Faster Whisper model
+# You can use: tiny, base, small, medium
+model = WhisperModel(
+    "base",
+    device="cpu",
+    compute_type="int8"
+)
 
 
-model = load_whisper_model()
-
-
-# --------------------------------------------------
-# YOUTUBE VIDEO ID EXTRACTOR
-# --------------------------------------------------
-def extract_video_id(url):
-    patterns = [
-        r"(?:v=)([^&]+)",
-        r"youtu\.be/([^?&]+)",
-        r"shorts/([^?&]+)",
-        r"embed/([^?&]+)"
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-
-    return None
-
-
-# --------------------------------------------------
-# GET YOUTUBE CAPTIONS FIRST
-# --------------------------------------------------
-def get_youtube_captions(url):
+def download_audio(youtube_url):
     """
-    First try to get captions/transcript directly.
-    This avoids YouTube download blocking on Streamlit Cloud.
+    Downloads audio from YouTube video.
+    Returns audio file path.
     """
-    try:
-        video_id = extract_video_id(url)
 
-        if not video_id:
-            return None
-
-        transcript_list = YouTubeTranscriptApi.get_transcript(
-            video_id,
-            languages=["en", "en-US", "en-GB", "hi"]
-        )
-
-        transcript = " ".join([item["text"] for item in transcript_list])
-        return transcript.strip()
-
-    except Exception:
-        return None
-
-
-# --------------------------------------------------
-# DOWNLOAD AUDIO FALLBACK
-# --------------------------------------------------
-def download_audio(url):
-    """
-    Fallback only.
-    This can fail on Streamlit Cloud because YouTube blocks cloud IPs.
-    """
     os.makedirs("downloads", exist_ok=True)
 
-    output_path = "downloads/audio.%(ext)s"
+    output_template = "downloads/audio.%(ext)s"
 
     ydl_opts = {
         "format": "bestaudio/best",
-        "outtmpl": output_path,
+        "outtmpl": output_template,
         "quiet": True,
         "noplaylist": True,
-        "nocheckcertificate": True,
-        "ignoreerrors": False,
-        "no_warnings": False,
-
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        },
-
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
-                "preferredquality": "192",
+                "preferredquality": "128",
             }
         ],
     }
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info(url, download=True)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([youtube_url])
 
-        audio_file = "downloads/audio.mp3"
+    audio_path = "downloads/audio.mp3"
 
-        if os.path.exists(audio_file):
-            return audio_file
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError("Audio file was not created. Check FFmpeg installation.")
 
-        files = os.listdir("downloads")
-        audio_files = [
-            f for f in files
-            if f.endswith((".mp3", ".m4a", ".webm", ".opus", ".wav"))
-        ]
-
-        if audio_files:
-            return os.path.join("downloads", audio_files[0])
-
-        return None
-
-    except Exception:
-        st.warning(
-            "YouTube blocked audio download on Streamlit Cloud. "
-            "This usually happens because YouTube detected the server as a bot."
-        )
-        return None
+    return audio_path
 
 
-# --------------------------------------------------
-# TRANSCRIBE AUDIO FILE
-# --------------------------------------------------
 def transcribe_audio(audio_path):
-    try:
-        segments, info = model.transcribe(audio_path)
-
-        transcript = ""
-        for segment in segments:
-            transcript += segment.text + " "
-
-        return transcript.strip()
-
-    except Exception as e:
-        st.error(f"Transcription failed: {e}")
-        return None
-
-
-# --------------------------------------------------
-# SMART TRANSCRIPT FUNCTION
-# --------------------------------------------------
-def get_transcript_from_youtube(url):
     """
-    Main function:
-    1. Try YouTube captions first
-    2. If captions fail, try yt-dlp audio download
-    3. If download works, transcribe with Whisper
-    4. If both fail, return None
+    Transcribes audio using Faster Whisper.
+    Returns:
+    - full transcript
+    - timestamped segments
     """
-    transcript = get_youtube_captions(url)
 
-    if transcript:
-        return transcript
+    segments, info = model.transcribe(
+        audio_path,
+        beam_size=5,
+        vad_filter=True
+    )
 
-    audio_path = download_audio(url)
+    transcript = ""
+    timestamped_segments = []
 
-    if not audio_path:
-        return None
+    for segment in segments:
+        start = round(segment.start, 2)
+        end = round(segment.end, 2)
+        text = segment.text.strip()
 
-    transcript = transcribe_audio(audio_path)
+        transcript += text + " "
 
-    if not transcript:
-        return None
+        timestamped_segments.append(
+            {
+                "start": start,
+                "end": end,
+                "text": text
+            }
+        )
 
-    return transcript
+    return transcript.strip(), timestamped_segments
 
 
-# --------------------------------------------------
-# GROQ RESPONSE HELPER
-# --------------------------------------------------
-def ask_groq(prompt, system_message="You are a helpful assistant.", temperature=0.3):
+def seconds_to_timestamp(seconds):
+    """
+    Converts seconds to YouTube timestamp format.
+    Example: 75 -> 01:15
+    """
+
+    seconds = int(seconds)
+    minutes = seconds // 60
+    sec = seconds % 60
+
+    return f"{minutes:02d}:{sec:02d}"
+
+
+def generate_summary(transcript):
+    """
+    Generates structured summary from transcript.
+    """
+
+    prompt = f"""
+You are an expert YouTube video summarizer.
+
+Analyze the transcript and generate a clear structured summary.
+
+Return the answer in this format:
+
+## Key Topics
+- topic 1
+- topic 2
+
+## Core Takeaways
+- takeaway 1
+- takeaway 2
+
+## Main Themes
+- theme 1
+- theme 2
+
+## Short Summary
+Write a simple useful summary in 5-8 lines.
+
+Transcript:
+{transcript}
+"""
+
     response = client.chat.completions.create(
         model="llama-3.1-8b-instant",
         messages=[
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": "You summarize video transcripts into structured notes."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
         ],
-        temperature=temperature,
+        temperature=0.3,
     )
 
     return response.choices[0].message.content
 
 
-# --------------------------------------------------
-# GENERATE SUMMARY
-# --------------------------------------------------
-def generate_summary(transcript):
+def generate_timestamps(timestamped_segments):
+    """
+    Generates important clickable timestamp points.
+    """
+
+    combined_text = ""
+
+    for segment in timestamped_segments:
+        time_text = seconds_to_timestamp(segment["start"])
+        combined_text += f"[{time_text}] {segment['text']}\n"
+
     prompt = f"""
-Summarize the following YouTube video transcript in a simple and useful way.
+You are analyzing a YouTube transcript with timestamps.
 
-Include:
-1. Short Summary
-2. Key Points
-3. Important Takeaways
-4. Actionable Learning
+Create important video timeline points.
 
-Transcript:
-{transcript}
+Return only this format:
+
+- 00:00 - Introduction
+- 01:25 - Main concept explained
+- 03:40 - Example or demo
+- 06:15 - Final conclusion
+
+Timestamped Transcript:
+{combined_text}
 """
 
-    return ask_groq(
-        prompt,
-        system_message="You are a helpful YouTube video summarizer.",
-        temperature=0.3
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[
+            {
+                "role": "system",
+                "content": "You create useful video navigation timestamps."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        temperature=0.2,
     )
 
-
-# --------------------------------------------------
-# GENERATE TIMESTAMPS
-# --------------------------------------------------
-def generate_timestamps(transcript):
-    prompt = f"""
-Create useful timestamp-style sections from this transcript.
-
-If exact timestamps are not available, create logical video sections like:
-00:00 - Introduction
-02:00 - Main Topic
-05:00 - Key Explanation
-
-Transcript:
-{transcript}
-"""
-
-    return ask_groq(
-        prompt,
-        system_message="You create useful video timestamp sections.",
-        temperature=0.3
-    )
+    return response.choices[0].message.content
 
 
-# --------------------------------------------------
-# GENERATE TEXT MIND MAP
-# --------------------------------------------------
 def generate_mindmap(transcript):
-    prompt = f"""
-Create a clear text-based mind map from this YouTube transcript.
+    """
+    Generates mind map structure in JSON.
+    """
 
-Format:
-Main Topic
-- Branch 1
-  - Sub point
-  - Sub point
-- Branch 2
-  - Sub point
-  - Sub point
+    prompt = f"""
+Create a hierarchical mind map from this video transcript.
+
+Return valid JSON only.
+
+Use this format:
+
+{{
+  "title": "Main Video Topic",
+  "children": [
+    {{
+      "title": "Main Idea 1",
+      "children": [
+        {{"title": "Sub point 1"}},
+        {{"title": "Sub point 2"}}
+      ]
+    }},
+    {{
+      "title": "Main Idea 2",
+      "children": [
+        {{"title": "Sub point 1"}},
+        {{"title": "Sub point 2"}}
+      ]
+    }}
+  ]
+}}
 
 Transcript:
 {transcript}
 """
 
-    return ask_groq(
-        prompt,
-        system_message="You create clean mind maps from transcripts.",
-        temperature=0.3
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[
+            {
+                "role": "system",
+                "content": "You generate valid JSON mind maps from transcripts."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        temperature=0.2,
     )
 
+    result = response.choices[0].message.content
 
-# --------------------------------------------------
-# CHAT WITH VIDEO
-# --------------------------------------------------
-def ask_video_question(transcript, question):
+    try:
+        return json.loads(result)
+    except Exception:
+        return {
+            "title": "Video Mind Map",
+            "children": [
+                {
+                    "title": "Could not parse mind map JSON",
+                    "children": [
+                        {"title": result}
+                    ]
+                }
+            ]
+        }
+
+
+def chat_with_video(transcript, user_question):
+    """
+    Answers user question using transcript context.
+    """
+
     prompt = f"""
-Answer the user's question using only this video transcript.
+You are an AI assistant that answers questions only from the video transcript.
 
 If the answer is not available in the transcript, say:
 "The video transcript does not contain enough information to answer this."
@@ -297,68 +279,64 @@ If the answer is not available in the transcript, say:
 Transcript:
 {transcript}
 
-Question:
-{question}
+User Question:
+{user_question}
 """
 
-    return ask_groq(
-        prompt,
-        system_message="You answer questions based on video transcripts.",
-        temperature=0.2
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[
+            {
+                "role": "system",
+                "content": "You answer questions based only on the provided video transcript."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        temperature=0.2,
     )
 
+    return response.choices[0].message.content
 
-# --------------------------------------------------
-# CREATE INTERACTIVE MIND MAP HTML
-# --------------------------------------------------
-def create_mindmap_html(mindmap_text, output_file="mindmap.html"):
+
+from pyvis.network import Network
+
+
+def create_mindmap_html(mindmap_data, output_file="mindmap.html"):
     """
-    Creates an interactive mind map HTML using PyVis.
-    Works with text-based mindmap output.
+    Creates interactive mind map HTML using PyVis.
     """
-    try:
-        net = Network(
-            height="600px",
-            width="100%",
-            bgcolor="#ffffff",
-            font_color="#000000",
-            directed=True
-        )
 
-        lines = [line.rstrip() for line in mindmap_text.split("\n") if line.strip()]
+    net = Network(
+        height="600px",
+        width="100%",
+        bgcolor="#ffffff",
+        font_color="black",
+        directed=True
+    )
 
-        if not lines:
-            return None
+    def add_nodes_edges(node, parent=None):
+        title = node.get("title", "Untitled")
 
-        main_topic = lines[0].replace("#", "").replace("-", "").strip()
-        net.add_node(main_topic, label=main_topic, color="#ffcc00", size=30)
+        net.add_node(title, label=title)
 
-        parent_stack = [(0, main_topic)]
+        if parent:
+            net.add_edge(parent, title)
 
-        for line in lines[1:]:
-            stripped = line.strip()
-            clean_text = stripped.replace("-", "").replace("*", "").strip()
+        for child in node.get("children", []):
+            add_nodes_edges(child, title)
 
-            if not clean_text:
-                continue
+    add_nodes_edges(mindmap_data)
 
-            indent = len(line) - len(line.lstrip())
+    net.repulsion(
+        node_distance=180,
+        central_gravity=0.2,
+        spring_length=200,
+        spring_strength=0.05
+    )
 
-            while parent_stack and parent_stack[-1][0] >= indent:
-                parent_stack.pop()
+    net.save_graph(output_file)
 
-            parent = parent_stack[-1][1] if parent_stack else main_topic
-
-            node_id = clean_text + str(indent) + str(len(parent_stack))
-
-            net.add_node(node_id, label=clean_text, color="#87CEEB", size=18)
-            net.add_edge(parent, node_id)
-
-            parent_stack.append((indent, node_id))
-
-        net.write_html(output_file)
-        return output_file
-
-    except Exception as e:
-        st.error(f"Mind map HTML creation failed: {e}")
-        return None
+    return output_file
