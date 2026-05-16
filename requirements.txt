@@ -6,3 +6,4 @@ python-dotenv
 requests
 reportlab
 graphviz
+youtube-transcript-api
