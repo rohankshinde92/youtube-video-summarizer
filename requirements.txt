@@ -1,10 +1,8 @@
 streamlit
-yt-dlp>=2025.1.15
+yt-dlp
 faster-whisper
 groq
 python-dotenv
-requests
-reportlab
-graphviz
-youtube-transcript-api
+ffmpeg-python
+networkx
 pyvis
