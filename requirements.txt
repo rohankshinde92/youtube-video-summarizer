@@ -1,0 +1,8 @@
+streamlit
+yt-dlp
+faster-whisper
+groq
+python-dotenv
+ffmpeg-python
+networkx
+pyvis
