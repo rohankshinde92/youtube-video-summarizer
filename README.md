@@ -48,7 +48,7 @@ An AI-powered YouTube Video Summarizer that extracts audio from YouTube videos, 
 
 ```bash
 # Clone repository
-git clone <your-github-repo-link>
+git clone https://github.com/rohankshinde92/youtube-video-summarizer.git
 
 # Move into project folder
 cd youtube-video-summarizer
